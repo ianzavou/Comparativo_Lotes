@@ -16,6 +16,7 @@ _REQUIRED_ROUTE_ANALYSIS_EXPORTS = (
     "DEFAULT_DASHBOARD_SNAPSHOT",
     "DEFAULT_OUTPUT_FILE",
     "aligned_route_colors",
+    "build_nearest_neighbor_paths",
     "load_dashboard_snapshot",
 )
 route_analysis_module = importlib.reload(route_analysis_module)
@@ -33,6 +34,7 @@ if missing_route_analysis_exports:
 DEFAULT_DASHBOARD_SNAPSHOT = route_analysis_module.DEFAULT_DASHBOARD_SNAPSHOT
 DEFAULT_OUTPUT_FILE = route_analysis_module.DEFAULT_OUTPUT_FILE
 aligned_route_colors = route_analysis_module.aligned_route_colors
+build_nearest_neighbor_paths = route_analysis_module.build_nearest_neighbor_paths
 load_dashboard_snapshot = route_analysis_module.load_dashboard_snapshot
 PROJECT_DIR = Path(__file__).resolve().parent
 COMPANY_LOGO = PROJECT_DIR / "assets" / "Logo Engelmig.jpg"
@@ -56,6 +58,12 @@ def load_snapshot(snapshot_path: str, modified_ns: int, size: int):
 def load_output_file(output_path: str, modified_ns: int, size: int) -> bytes:
     del modified_ns, size
     return Path(output_path).read_bytes()
+
+
+@st.cache_data(show_spinner=False, max_entries=12)
+def load_path_overlay(points: pd.DataFrame) -> pd.DataFrame:
+    path_columns = ["route", "installation", "latitude", "longitude"]
+    return build_nearest_neighbor_paths(points[path_columns].copy())
 
 
 def format_integer(value) -> str:
@@ -130,13 +138,55 @@ def build_map(
     routes: pd.DataFrame,
     view_state: pdk.ViewState,
     colors: dict[str, list[int]],
+    paths: pd.DataFrame | None = None,
 ) -> pdk.Deck:
     map_points = route_color_frame(points, colors)
+    map_points["map_label"] = "Instalação " + map_points["installation"].astype(str)
+    map_points["installations"] = 1
     centroids = routes[[
         "route", "centroid_latitude", "centroid_longitude", "installations"
     ]].copy()
     centroids["route"] = centroids["route"].astype(str)
     centroids["color"] = centroids["route"].map(colors)
+    centroids["map_label"] = "Centroide da UL"
+
+    layers: list[pdk.Layer] = []
+    if paths is not None and not paths.empty:
+        map_paths = route_color_frame(paths, colors)
+        map_paths["color"] = map_paths["color"].map(
+            lambda color: [*color[:3], 235] if isinstance(color, list) else [242, 142, 43, 235]
+        )
+        map_paths["map_label"] = map_paths.apply(
+            lambda row: (
+                f"Trecho NN {int(row['segment'])}/{int(row['segments'])}: "
+                f"{format_distance(row['segment_distance_km'])} "
+                f"(UL: {format_distance(row['distance_km'])})"
+            ),
+            axis=1,
+        )
+        layers.extend([
+            pdk.Layer(
+                "PathLayer",
+                data=map_paths,
+                get_path="path",
+                get_color=[20, 25, 35, 155],
+                get_width=7,
+                width_min_pixels=3,
+                width_max_pixels=8,
+                pickable=False,
+            ),
+            pdk.Layer(
+                "PathLayer",
+                data=map_paths,
+                get_path="path",
+                get_color="color",
+                get_width=4,
+                width_min_pixels=2,
+                width_max_pixels=5,
+                pickable=True,
+                auto_highlight=True,
+            ),
+        ])
 
     point_layer = pdk.Layer(
         "ScatterplotLayer",
@@ -164,12 +214,13 @@ def build_map(
         pickable=True,
         opacity=0.98,
     )
+    layers.extend([point_layer, centroid_layer])
     return pdk.Deck(
-        layers=[point_layer, centroid_layer],
+        layers=layers,
         initial_view_state=view_state,
         map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
         tooltip={
-            "html": "<b>UL:</b> {route}<br/><b>Instalação:</b> {installation}<br/><b>Quantidade:</b> {installations}",
+            "html": "<b>UL:</b> {route}<br/><b>Elemento:</b> {map_label}<br/><b>Instalações:</b> {installations}",
             "style": {"backgroundColor": "#17365D", "color": "white"},
         },
     )
@@ -392,6 +443,23 @@ with tab_map:
         analysis["route_metrics"]["lot"].eq(selected_lot)
         & analysis["route_metrics"]["scenario"].eq("Otimizada")
     ]
+    show_route_paths = st.toggle(
+        "Exibir traçado por vizinho mais próximo",
+        value=False,
+        key="show_route_paths",
+        help=(
+            "Liga as instalações de cada UL em um caminho aberto: começa no ponto "
+            "mais afastado do centroide e segue para o ponto não visitado mais próximo."
+        ),
+    )
+    current_paths = None
+    optimized_paths = None
+    if show_route_paths:
+        with st.spinner("Montando os traçados das ULs..."):
+            if not current_lot.empty:
+                current_paths = load_path_overlay(current_lot)
+            if not optimized_lot.empty:
+                optimized_paths = load_path_overlay(optimized_lot)
     if current_lot.empty and optimized_lot.empty:
         st.info("Não há coordenadas disponíveis para este lote.")
     else:
@@ -406,7 +474,10 @@ with tab_map:
                 st.info("Sem base atual para o lote.")
             else:
                 st.pydeck_chart(
-                    build_map(current_lot, current_routes, view_state, current_colors),
+                    build_map(
+                        current_lot, current_routes, view_state, current_colors,
+                        current_paths,
+                    ),
                     width="stretch",
                 )
         with columns[1]:
@@ -415,11 +486,14 @@ with tab_map:
                 st.info("O lote ainda não foi incluído no arquivo roteirizado.")
             else:
                 st.pydeck_chart(
-                    build_map(optimized_lot, optimized_routes, view_state, optimized_colors),
+                    build_map(
+                        optimized_lot, optimized_routes, view_state, optimized_colors,
+                        optimized_paths,
+                    ),
                     width="stretch",
                 )
         st.caption(
-            "Os dois mapas usam o mesmo enquadramento. Nos lotes comparáveis, as cores são alinhadas pela maior sobreposição de instalações, não pelo ID da UL. Os círculos maiores são centroides."
+            "Os dois mapas usam o mesmo enquadramento. Nos lotes comparáveis, as cores são alinhadas pela maior sobreposição de instalações, não pelo ID da UL. Os círculos maiores são centroides. Quando ativado, o traçado é uma estimativa aberta por vizinho mais próximo, não uma rota viária real."
         )
 
 with tab_distribution:
@@ -647,7 +721,7 @@ with tab_glossary:
         1. **Selecione um lote comparável** na barra lateral e confirme a quantidade de instalações nos dois cenários.
         2. Use **Todos os pares** para avaliar a compactação geral das ULs e **Vizinho mais próximo** para avaliar a proximidade local entre instalações.
         3. No **Resumo**, verifique se a redução de rotas ocorreu junto com redução das distâncias e do raio médio.
-        4. Use **Mapa** e **Dispersão** para localizar ULs extensas, instalações isoladas e valores extremos escondidos pela média.
+        4. Use **Mapa** e **Dispersão** para localizar ULs extensas, instalações isoladas e valores extremos escondidos pela média. No mapa, ative o traçado para evidenciar saltos longos dentro da UL.
         5. Em **Percurso total**, compare a soma das sequências estimadas por Haversine e por projeção métrica do GeoPandas.
         6. Em **Reagrupamento**, quantifique quanto da composição anterior foi preservada ou reorganizada.
         7. Considere melhora quando houver mais compactação e equilíbrio sem perda relevante de cobertura. Nenhum indicador deve ser analisado isoladamente.
@@ -663,8 +737,8 @@ with tab_glossary:
         },
         {
             "Aba": "Mapa",
-            "O que apresenta": "Distribuição geográfica das instalações e centroides nos dois cenários.",
-            "Como analisar": "Compare compactação, continuidade territorial, sobreposições e pontos isolados. As cores são alinhadas por sobreposição de instalações, não pelo ID da UL.",
+            "O que apresenta": "Distribuição geográfica das instalações e centroides, com traçado opcional por vizinho mais próximo.",
+            "Como analisar": "Ative o traçado e procure segmentos muito longos, que evidenciam instalações isoladas ou descontinuidades. As cores são alinhadas por sobreposição, não pelo ID da UL.",
         },
         {
             "Aba": "Dispersão",

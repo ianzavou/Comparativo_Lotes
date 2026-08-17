@@ -279,6 +279,70 @@ def nearest_neighbor_path_total(
     return order, total
 
 
+def build_nearest_neighbor_paths(data: pd.DataFrame) -> pd.DataFrame:
+    """Prepara os trechos Haversine de cada UL usando o mesmo critério do percurso total."""
+    columns = [
+        "route", "path", "installations", "segment", "segments",
+        "segment_distance_km", "distance_km", "max_segment_km",
+        "from_installation", "to_installation",
+    ]
+    if data.empty:
+        return pd.DataFrame(columns=columns)
+
+    required = {"route", "installation", "latitude", "longitude"}
+    missing = required.difference(data.columns)
+    if missing:
+        raise ValueError(
+            "Dados do traçado sem as colunas obrigatórias: "
+            + ", ".join(sorted(missing))
+        )
+
+    records: list[dict[str, Any]] = []
+    for route, route_data in data.groupby("route", sort=True):
+        route_data = route_data.reset_index(drop=True)
+        count = int(len(route_data))
+        if count < 2:
+            continue
+
+        latitudes = route_data["latitude"].to_numpy(float)
+        longitudes = route_data["longitude"].to_numpy(float)
+        centroid_latitude = float(np.mean(latitudes))
+        centroid_longitude = float(np.mean(longitudes))
+        radius = haversine_to_point(
+            latitudes, longitudes, centroid_latitude, centroid_longitude
+        )
+        distance_matrix = haversine_matrix(latitudes, longitudes)
+        np.fill_diagonal(distance_matrix, np.inf)
+        start_index = int(np.argmax(radius))
+        order, total_distance = nearest_neighbor_path_total(
+            distance_matrix, start_index
+        )
+        segment_distances = distance_matrix[order[:-1], order[1:]]
+        installations = route_data["installation"].astype(str).to_numpy()
+
+        max_segment_distance = float(np.max(segment_distances))
+        for segment_number, (from_index, to_index, segment_distance) in enumerate(
+            zip(order[:-1], order[1:], segment_distances), start=1
+        ):
+            records.append({
+                "route": str(route),
+                "path": [
+                    [float(longitudes[from_index]), float(latitudes[from_index])],
+                    [float(longitudes[to_index]), float(latitudes[to_index])],
+                ],
+                "installations": count,
+                "segment": segment_number,
+                "segments": count - 1,
+                "segment_distance_km": float(segment_distance),
+                "distance_km": float(total_distance),
+                "max_segment_km": max_segment_distance,
+                "from_installation": str(installations[from_index]),
+                "to_installation": str(installations[to_index]),
+            })
+
+    return pd.DataFrame.from_records(records, columns=columns)
+
+
 def _euclidean_matrix_km(coordinates_m: np.ndarray) -> np.ndarray:
     coordinates = np.asarray(coordinates_m, dtype=float)
     differences = coordinates[:, None, :] - coordinates[None, :, :]
