@@ -226,12 +226,11 @@ def build_map(
     )
 
 
-def build_summary_table(current_metric, optimized_metric, method_prefix: str) -> pd.DataFrame:
-    method_name = "Pares dentro da UL" if method_prefix == "pair" else "Vizinho mais próximo"
+def build_summary_table(current_metric, optimized_metric) -> pd.DataFrame:
     definitions = [
-        (f"{method_name} — média", f"{method_prefix}_mean_km", "km"),
-        (f"{method_name} — mediana", f"{method_prefix}_median_km", "km"),
-        (f"{method_name} — máxima", f"{method_prefix}_max_km", "km"),
+        ("Vizinho mais próximo — média", "nearest_mean_km", "km"),
+        ("Vizinho mais próximo — mediana", "nearest_median_km", "km"),
+        ("Vizinho mais próximo — máxima", "nearest_max_km", "km"),
         ("Instalação ao centroide — média", "radius_mean_km", "km"),
         ("Instalação ao centroide — mediana", "radius_median_km", "km"),
         ("Instalação ao centroide — máxima", "radius_max_km", "km"),
@@ -299,13 +298,6 @@ selected_lot = st.sidebar.selectbox(
     index=available_lots.index(default_lot),
     format_func=lambda lot: f"Lote {lot}",
 )
-distance_method = st.sidebar.radio(
-    "Leitura de distância",
-    ["Todos os pares", "Vizinho mais próximo"],
-    help="O seletor altera os cartões e gráficos, sem recalcular ou ocultar os demais resultados do Excel.",
-)
-method_prefix = "pair" if distance_method == "Todos os pares" else "nearest"
-
 if output_path.exists():
     output_stat = output_path.stat()
     st.sidebar.download_button(
@@ -363,12 +355,12 @@ kpi_columns[1].metric(
     format_percent(coverage_row["current_coverage_pct"]) + " comuns" if pd.notna(coverage_row["current_coverage_pct"]) else None,
     delta_color="off",
 )
-primary_field = f"{method_prefix}_mean_km"
+primary_field = "nearest_mean_km"
 current_primary = np.nan if current_metric is None else current_metric[primary_field]
 optimized_primary = np.nan if optimized_metric is None else optimized_metric[primary_field]
 primary_delta = metric_delta(current_primary, optimized_primary)
 kpi_columns[2].metric(
-    "Distância média selecionada",
+    "Distância média ao vizinho",
     format_distance(optimized_primary) if pd.notna(optimized_primary) else format_distance(current_primary),
     format_distance(primary_delta) if primary_delta is not None else None,
     delta_color="inverse",
@@ -383,9 +375,9 @@ kpi_columns[3].metric(
     delta_color="inverse",
 )
 kpi_columns[4].metric(
-    "Retenção de pares",
+    "Retenção de vínculos",
     format_percent(None if stability_row is None else stability_row["pair_retention"]),
-    help="Dos pares que estavam juntos antes, quantos continuam juntos após a roteirização.",
+    help="Dos vínculos entre instalações que estavam na mesma UL, quantos permanecem após a roteirização.",
 )
 
 tab_summary, tab_map, tab_distribution, tab_total_distance, tab_regrouping, tab_glossary = st.tabs(
@@ -395,7 +387,7 @@ tab_summary, tab_map, tab_distribution, tab_total_distance, tab_regrouping, tab_
 with tab_summary:
     st.subheader(f"Indicadores do lote {selected_lot}")
     st.dataframe(
-        build_summary_table(current_metric, optimized_metric, method_prefix),
+        build_summary_table(current_metric, optimized_metric),
         hide_index=True,
         width="stretch",
     )
@@ -404,11 +396,11 @@ with tab_summary:
     if not lot_comparison.empty:
         chart_data = analysis["route_metrics"].loc[
             analysis["route_metrics"]["lot"].eq(selected_lot),
-            ["scenario", "route", "installations", f"{method_prefix}_mean_km", "radius_mean_km"],
+            ["scenario", "route", "installations", "nearest_mean_km", "radius_mean_km"],
         ].copy()
         chart_data = chart_data.rename(columns={
             "scenario": "Cenário",
-            f"{method_prefix}_mean_km": "Distância média km",
+            "nearest_mean_km": "Distância média km",
             "installations": "Instalações",
         })
         chart_data["Distância exibida"] = chart_data["Distância média km"].map(
@@ -503,7 +495,7 @@ with tab_distribution:
     route_selected["Cenário"] = route_selected["scenario"].replace(
         {"Otimizada": "Roteirizada"}
     )
-    selected_field = f"{method_prefix}_mean_km"
+    selected_field = "nearest_mean_km"
     if route_selected.empty:
         st.info("Não há ULs disponíveis neste lote.")
     else:
@@ -516,23 +508,23 @@ with tab_distribution:
                 color=alt.Color("Cenário:N", legend=None, scale=alt.Scale(domain=["Atual", "Roteirizada"], range=["#637C8E", "#F28E2B"])),
                 tooltip=["Cenário:N", "route:N", alt.Tooltip(f"{selected_field}:Q", format=".3f")],
             )
-            .properties(height=360, title=f"Distribuição entre ULs — {distance_method}")
+            .properties(height=360, title="Distribuição entre ULs — Vizinho mais próximo")
         )
         st.altair_chart(chart, width="stretch")
         display_columns = [
-            "scenario", "route", "installations", f"{method_prefix}_mean_km",
-            f"{method_prefix}_median_km", f"{method_prefix}_max_km",
+            "scenario", "route", "installations", "nearest_mean_km",
+            "nearest_median_km", "nearest_max_km",
             "radius_mean_km", "route_to_lot_centroid_km", "separation_index",
         ]
         table = route_selected[display_columns].sort_values(
-            f"{method_prefix}_mean_km", ascending=False
+            "nearest_mean_km", ascending=False
         ).rename(columns={
             "scenario": "Cenário",
             "route": "UL",
             "installations": "Instalações",
-            f"{method_prefix}_mean_km": "Média",
-            f"{method_prefix}_median_km": "Mediana",
-            f"{method_prefix}_max_km": "Máxima",
+            "nearest_mean_km": "Média",
+            "nearest_median_km": "Mediana",
+            "nearest_max_km": "Máxima",
             "radius_mean_km": "Raio médio",
             "route_to_lot_centroid_km": "Centroide UL-lote",
             "separation_index": "Índice de separação",
@@ -671,9 +663,9 @@ with tab_regrouping:
         st.info("A análise de reagrupamento exige que o lote exista nos dois cenários.")
     else:
         group_kpis = st.columns(5)
-        group_kpis[0].metric("Pares mantidos", format_integer(stability_row["retained_pairs"]))
-        group_kpis[1].metric("Pares separados", format_integer(stability_row["separated_pairs"]))
-        group_kpis[2].metric("Novos pares", format_integer(stability_row["newly_grouped_pairs"]))
+        group_kpis[0].metric("Vínculos mantidos", format_integer(stability_row["retained_pairs"]))
+        group_kpis[1].metric("Vínculos separados", format_integer(stability_row["separated_pairs"]))
+        group_kpis[2].metric("Novos vínculos", format_integer(stability_row["newly_grouped_pairs"]))
         group_kpis[3].metric("Jaccard", format_percent(stability_row["pair_jaccard"]))
         group_kpis[4].metric("ARI", format_number(stability_row["ari"], 3))
         heatmap_data = transitions_lot.copy()
@@ -703,14 +695,14 @@ with tab_regrouping:
                 "dominant_optimized_route": "UL dominante",
                 "dominant_share": "Participação dominante",
                 "fragmentation_index": "Índice de fragmentação",
-                "separated_pairs": "Pares separados",
-                "separated_pairs_pct": "Pares separados %",
+                "separated_pairs": "Vínculos separados",
+                "separated_pairs_pct": "Vínculos separados %",
             }),
             hide_index=True,
             width="stretch",
             column_config={
                 "Participação dominante": st.column_config.ProgressColumn(format="percent"),
-                "Pares separados %": st.column_config.ProgressColumn(format="percent"),
+                "Vínculos separados %": st.column_config.ProgressColumn(format="percent"),
             },
         )
 
@@ -719,7 +711,7 @@ with tab_glossary:
     st.markdown(
         """
         1. **Selecione um lote comparável** na barra lateral e confirme a quantidade de instalações nos dois cenários.
-        2. Use **Todos os pares** para avaliar a compactação geral das ULs e **Vizinho mais próximo** para avaliar a proximidade local entre instalações.
+        2. Use a distância de **Vizinho mais próximo** para avaliar a proximidade local entre instalações e identificar pontos isolados.
         3. No **Resumo**, verifique se a redução de rotas ocorreu junto com redução das distâncias e do raio médio.
         4. Use **Mapa** e **Dispersão** para localizar ULs extensas, instalações isoladas e valores extremos escondidos pela média. No mapa, ative o traçado para evidenciar saltos longos dentro da UL.
         5. Em **Percurso total**, compare a soma das sequências estimadas por Haversine e por projeção métrica do GeoPandas.
@@ -752,7 +744,7 @@ with tab_glossary:
         },
         {
             "Aba": "Reagrupamento",
-            "O que apresenta": "Matriz de transição, retenção de pares e fragmentação das ULs atuais.",
+            "O que apresenta": "Matriz de transição, retenção de vínculos e fragmentação das ULs atuais.",
             "Como analisar": "Identifique quais grupos permaneceram juntos, quais foram separados e para quantas ULs roteirizadas cada UL atual foi distribuída.",
         },
         {
@@ -774,11 +766,6 @@ with tab_glossary:
 
     st.markdown("#### Glossário dos indicadores")
     indicators_guide = pd.DataFrame([
-        {
-            "Indicador": "Todos os pares",
-            "Definição": "Distâncias entre todas as combinações de duas instalações dentro da mesma UL.",
-            "Leitura": "Valores menores indicam maior compactação geral. ULs maiores contribuem com mais pares para o consolidado do lote.",
-        },
         {
             "Indicador": "Vizinho mais próximo",
             "Definição": "Distância de cada instalação até a instalação mais próxima da mesma UL.",
@@ -815,13 +802,13 @@ with tab_glossary:
             "Leitura": "Valores maiores geralmente indicam grupos mais separados em relação à dispersão interna.",
         },
         {
-            "Indicador": "Retenção de pares",
-            "Definição": "Percentual dos pares de instalações que estavam juntos e continuam juntos após a roteirização.",
+            "Indicador": "Retenção de vínculos",
+            "Definição": "Percentual dos vínculos entre instalações que permanecem na mesma UL após a roteirização.",
             "Leitura": "Valor alto significa maior preservação da estrutura anterior; não significa necessariamente melhor compactação.",
         },
         {
             "Indicador": "Jaccard",
-            "Definição": "Similaridade entre os pares agrupados nos dois cenários.",
+            "Definição": "Similaridade entre os vínculos de agrupamento nos dois cenários.",
             "Leitura": "Varia de 0 a 1. Quanto mais próximo de 1, mais semelhantes são os agrupamentos.",
         },
         {

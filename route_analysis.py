@@ -22,7 +22,7 @@ DEFAULT_CURRENT_FILE = Path("Rotas_Atuais_VV_Completo.xlsx")
 DEFAULT_OPTIMIZED_FILE = Path("Rota_Pronta_VV_Consolidado.xlsx")
 DEFAULT_OUTPUT_FILE = Path("outputs/Comparativo_Rotas_VV.xlsx")
 DEFAULT_DASHBOARD_SNAPSHOT = Path("outputs/dashboard_snapshot.pkl.gz")
-DASHBOARD_SNAPSHOT_VERSION = 2
+DASHBOARD_SNAPSHOT_VERSION = 3
 
 
 @dataclass
@@ -374,7 +374,6 @@ def compute_spatial_metrics(data: pd.DataFrame, scenario: str) -> tuple[pd.DataF
             },
             index=lot_data.index,
         )
-        pair_arrays: list[np.ndarray] = []
         nearest_arrays: list[np.ndarray] = []
         radius_arrays: list[np.ndarray] = []
         lot_route_indices: list[int] = []
@@ -389,7 +388,6 @@ def compute_spatial_metrics(data: pd.DataFrame, scenario: str) -> tuple[pd.DataF
 
             if count >= 2:
                 matrix = haversine_matrix(latitudes, longitudes)
-                pair_distances = matrix[np.triu_indices(count, 1)]
                 np.fill_diagonal(matrix, np.inf)
                 nearest_distances = np.min(matrix, axis=1)
                 haversine_start = int(np.argmax(radius))
@@ -412,7 +410,6 @@ def compute_spatial_metrics(data: pd.DataFrame, scenario: str) -> tuple[pd.DataF
                 )
                 del projected_matrix
             else:
-                pair_distances = np.array([], dtype=float)
                 nearest_distances = np.array([], dtype=float)
                 nn_path_haversine_km = 0.0
                 nn_path_geopandas_km = 0.0
@@ -424,7 +421,6 @@ def compute_spatial_metrics(data: pd.DataFrame, scenario: str) -> tuple[pd.DataF
                 "installations": count,
                 "centroid_latitude": centroid_lat,
                 "centroid_longitude": centroid_lon,
-                "pair_zero_pct": float(np.mean(pair_distances <= 1e-9)) if pair_distances.size else np.nan,
                 "nearest_zero_pct": float(np.mean(nearest_distances <= 1e-9)) if nearest_distances.size else np.nan,
                 "route_to_lot_centroid_km": float(
                     haversine_to_point(
@@ -437,12 +433,10 @@ def compute_spatial_metrics(data: pd.DataFrame, scenario: str) -> tuple[pd.DataF
                 "nn_path_haversine_km": float(nn_path_haversine_km),
                 "nn_path_geopandas_km": float(nn_path_geopandas_km),
             }
-            record.update(_stats(pair_distances, "pair"))
             record.update(_stats(nearest_distances, "nearest"))
             record.update(_stats(radius, "radius"))
             route_records.append(record)
             lot_route_indices.append(len(route_records) - 1)
-            pair_arrays.append(pair_distances)
             nearest_arrays.append(nearest_distances)
             radius_arrays.append(radius)
 
@@ -469,7 +463,6 @@ def compute_spatial_metrics(data: pd.DataFrame, scenario: str) -> tuple[pd.DataF
                 else np.nan
             )
 
-        all_pairs = np.concatenate(pair_arrays) if pair_arrays else np.array([], dtype=float)
         all_nearest = np.concatenate(nearest_arrays) if nearest_arrays else np.array([], dtype=float)
         all_radius = np.concatenate(radius_arrays) if radius_arrays else np.array([], dtype=float)
         route_sizes = lot_data.groupby("route", sort=False).size().to_numpy(float)
@@ -496,7 +489,6 @@ def compute_spatial_metrics(data: pd.DataFrame, scenario: str) -> tuple[pd.DataF
             "routes": int(len(lot_route_indices)),
             "lot_centroid_latitude": lot_centroid_lat,
             "lot_centroid_longitude": lot_centroid_lon,
-            "pair_zero_pct": float(np.mean(all_pairs <= 1e-9)) if all_pairs.size else np.nan,
             "nearest_zero_pct": float(np.mean(all_nearest <= 1e-9)) if all_nearest.size else np.nan,
             "route_size_min": float(np.min(route_sizes)),
             "route_size_mean": float(np.mean(route_sizes)),
@@ -517,7 +509,6 @@ def compute_spatial_metrics(data: pd.DataFrame, scenario: str) -> tuple[pd.DataF
             "nn_path_haversine_km": float(np.sum(nn_path_haversine)),
             "nn_path_geopandas_km": float(np.sum(nn_path_geopandas)),
         }
-        lot_record.update(_stats(all_pairs, "pair"))
         lot_record.update(_stats(all_nearest, "nearest"))
         lot_record.update(_stats(all_radius, "radius"))
         lot_record.update(_stats(route_to_lot, "route_to_lot_centroid"))
@@ -777,7 +768,6 @@ def build_lot_comparison(analysis: dict[str, Any]) -> pd.DataFrame:
         np.nan,
     )
     for metric in [
-        "pair_mean_km",
         "nearest_mean_km",
         "radius_mean_km",
         "route_to_lot_centroid_mean_km",
@@ -977,7 +967,7 @@ def _write_dataframe(
             for row_index in range(first_data_row, last_data_row + 1):
                 cell = worksheet.cell(row_index, column_index)
                 if "%" in str(column) or "percentual" in column_name or "share" in column_name or column_name in {
-                    "retenção de pares", "precisão de pares", "jaccard", "ari", "nmi"
+                    "retenção de vínculos", "precisão de vínculos", "jaccard", "ari", "nmi"
                 }:
                     cell.number_format = "0.0%"
                 elif "km" in column_name:
@@ -997,10 +987,6 @@ def _route_export(route_metrics: pd.DataFrame) -> pd.DataFrame:
         "installations": "Instalações",
         "centroid_latitude": "Latitude centroide",
         "centroid_longitude": "Longitude centroide",
-        "pair_mean_km": "Pares média km",
-        "pair_median_km": "Pares mediana km",
-        "pair_max_km": "Pares máxima km",
-        "pair_zero_pct": "Pares distância zero %",
         "nearest_mean_km": "Vizinho média km",
         "nearest_median_km": "Vizinho mediana km",
         "nearest_max_km": "Vizinho máxima km",
@@ -1029,14 +1015,6 @@ def _summary_export(analysis: dict[str, Any]) -> pd.DataFrame:
             "Rotas otimizada": comparison["optimized_routes"],
             "Delta rotas": comparison["route_delta"],
             "Redução de rotas %": comparison["route_reduction_pct"],
-            "Pares média atual km": comparison["current_pair_mean_km"],
-            "Pares média otimizada km": comparison["optimized_pair_mean_km"],
-            "Delta pares média km": comparison["pair_mean_km_delta"],
-            "Delta pares média %": np.where(
-                comparison["current_pair_mean_km"].notna() & comparison["current_pair_mean_km"].ne(0),
-                comparison["pair_mean_km_delta"] / comparison["current_pair_mean_km"],
-                np.nan,
-            ),
             "Vizinho média atual km": comparison["current_nearest_mean_km"],
             "Vizinho média otimizada km": comparison["optimized_nearest_mean_km"],
             "Delta vizinho média km": comparison["nearest_mean_km_delta"],
@@ -1046,8 +1024,8 @@ def _summary_export(analysis: dict[str, Any]) -> pd.DataFrame:
             "Centroide UL-lote atual km": comparison["current_route_to_lot_centroid_mean_km"],
             "Centroide UL-lote otimizada km": comparison["optimized_route_to_lot_centroid_mean_km"],
             "Delta centroide UL-lote km": comparison["route_to_lot_centroid_mean_km_delta"],
-            "Retenção de pares": comparison["pair_retention"],
-            "Precisão de pares": comparison["pair_precision"],
+            "Retenção de vínculos": comparison["pair_retention"],
+            "Precisão de vínculos": comparison["pair_precision"],
             "Jaccard": comparison["pair_jaccard"],
             "ARI": comparison["ari"],
             "NMI": comparison["nmi"],
@@ -1075,17 +1053,15 @@ def build_workbook(analysis: dict[str, Any]) -> Any:
         9: "=IF(AND(G{row}>0,H{row}>0),IFERROR(H{row}-G{row},\"\"),\"\")",
         10: "=IF(AND(G{row}>0,H{row}>0),IFERROR((G{row}-H{row})/G{row},\"\"),\"\")",
         13: "=IF(AND(G{row}>0,H{row}>0),IFERROR(L{row}-K{row},\"\"),\"\")",
-        14: "=IF(AND(G{row}>0,H{row}>0),IFERROR(M{row}/K{row},\"\"),\"\")",
-        17: "=IF(AND(G{row}>0,H{row}>0),IFERROR(P{row}-O{row},\"\"),\"\")",
-        20: "=IF(AND(G{row}>0,H{row}>0),IFERROR(S{row}-R{row},\"\"),\"\")",
-        23: "=IF(AND(G{row}>0,H{row}>0),IFERROR(V{row}-U{row},\"\"),\"\")",
+        16: "=IF(AND(G{row}>0,H{row}>0),IFERROR(O{row}-N{row},\"\"),\"\")",
+        19: "=IF(AND(G{row}>0,H{row}>0),IFERROR(R{row}-Q{row},\"\"),\"\")",
     }
     for row in range(header_row + 1, last_row + 1):
         for column, formula in formula_columns.items():
             ws.cell(row, column, formula.format(row=row))
     green_fill = PatternFill("solid", fgColor="E2F0D9")
     red_fill = PatternFill("solid", fgColor="FCE4D6")
-    for column in [9, 13, 17, 20, 23]:
+    for column in [9, 13, 16, 19]:
         letter = get_column_letter(column)
         ws.conditional_formatting.add(
             f"{letter}{header_row + 1}:{letter}{last_row}",
@@ -1100,7 +1076,7 @@ def build_workbook(analysis: dict[str, Any]) -> Any:
         FormulaRule(formula=[f'$B{header_row + 1}="Comparável"'], fill=green_fill),
     )
     ws.conditional_formatting.add(
-        f"X{header_row + 1}:Z{last_row}",
+        f"T{header_row + 1}:V{last_row}",
         ColorScaleRule(start_type="min", start_color="F8696B", mid_type="percentile", mid_value=50,
                        mid_color="FFEB84", end_type="max", end_color="63BE7B"),
     )
@@ -1123,7 +1099,7 @@ def build_workbook(analysis: dict[str, Any]) -> Any:
         "optimized_route_installations": "Total da UL otimizada",
         "share_current_route": "Participação na UL atual %",
         "share_optimized_route": "Participação na UL otimizada %",
-        "retained_pairs_in_cell": "Pares mantidos na célula",
+        "retained_pairs_in_cell": "Vínculos mantidos na célula",
     }
     ws = workbook.create_sheet("Transicoes_UL")
     _write_dataframe(
@@ -1137,13 +1113,13 @@ def build_workbook(analysis: dict[str, Any]) -> Any:
     stability = analysis["stability"].rename(columns={
         "lot": "Lote",
         "common_installations": "Instalações comuns",
-        "current_pairs": "Pares atuais",
-        "optimized_pairs": "Pares otimizados",
-        "retained_pairs": "Pares mantidos",
-        "separated_pairs": "Pares separados",
-        "newly_grouped_pairs": "Novos pares",
-        "pair_retention": "Retenção de pares",
-        "pair_precision": "Precisão de pares",
+        "current_pairs": "Vínculos atuais",
+        "optimized_pairs": "Vínculos roteirizados",
+        "retained_pairs": "Vínculos mantidos",
+        "separated_pairs": "Vínculos separados",
+        "newly_grouped_pairs": "Novos vínculos",
+        "pair_retention": "Retenção de vínculos",
+        "pair_precision": "Precisão de vínculos",
         "pair_jaccard": "Jaccard",
         "ari": "ARI",
         "nmi": "NMI",
@@ -1157,8 +1133,8 @@ def build_workbook(analysis: dict[str, Any]) -> Any:
         "dominant_installations": "Instalações no grupo dominante",
         "dominant_share": "Participação dominante %",
         "fragmentation_index": "Índice de fragmentação",
-        "separated_pairs": "Pares separados",
-        "separated_pairs_pct": "Pares separados %",
+        "separated_pairs": "Vínculos separados",
+        "separated_pairs_pct": "Vínculos separados %",
     })
     ws = workbook.create_sheet("Estabilidade")
     _, stability_end = _write_dataframe(
@@ -1173,7 +1149,7 @@ def build_workbook(analysis: dict[str, Any]) -> Any:
         ws,
         fragmentation,
         "Fragmentação das ULs atuais",
-        "Quanto menor a fragmentação e o percentual de pares separados, maior a continuidade do grupo.",
+        "Quanto menor a fragmentação e o percentual de vínculos separados, maior a continuidade do grupo.",
         start_row=second_start,
     )
     ws.freeze_panes = "A4"
@@ -1244,13 +1220,12 @@ def build_workbook(analysis: dict[str, Any]) -> Any:
     ws.freeze_panes = "C4"
 
     dictionary_rows = [
-        ("Pares média/mediana/máxima", "Distância Haversine de todas as combinações únicas de duas instalações da mesma UL."),
         ("Vizinho média/mediana/máxima", "Para cada instalação, distância Haversine até a instalação mais próxima da mesma UL."),
         ("Instalação-centroide", "Distância entre cada instalação e a média de latitude/longitude das instalações de sua UL."),
         ("Centroide UL-lote", "Distância do centroide da UL ao centroide do lote no mesmo cenário."),
         ("Índice de separação", "Distância ao centroide de UL mais próximo dividida pelo raio médio da UL; valores maiores indicam melhor separação."),
-        ("Retenção de pares", "Percentual dos pares que estavam juntos na UL atual e continuam juntos na otimizada."),
-        ("Precisão de pares", "Percentual dos pares juntos na otimizada que também estavam juntos na atual."),
+        ("Retenção de vínculos", "Percentual dos vínculos entre instalações que permanecem na mesma UL após a roteirização."),
+        ("Precisão de vínculos", "Percentual dos vínculos da estrutura roteirizada que também existiam na estrutura atual."),
         ("Jaccard", "Interseção sobre união das relações de coagrupamento atual e otimizada."),
         ("ARI", "Adjusted Rand Index entre os dois agrupamentos, calculado somente nas instalações comuns do lote."),
         ("NMI", "Normalized Mutual Information entre os agrupamentos, calculada somente nas instalações comuns do lote."),
