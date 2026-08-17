@@ -1,0 +1,24 @@
+# Ambiente e arquivos temporários do Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Segredos locais do Streamlit nunca devem ir ao GitHub
+.streamlit/secrets.toml
+
+# Fontes corporativas: o dashboard publicado usa somente os outputs processados
+Rotas_Atuais_VV_Completo.xlsx
+Rota_Pronta_VV_Consolidado.xlsx
+
+# Evidências e logs locais
+outputs/qa/
+outputs/*.log
+outputs/*.err
+
+# Arquivos comuns do sistema/IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
