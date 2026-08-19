@@ -862,12 +862,16 @@ def aligned_route_colors(
 ) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
     current_routes = sorted(current_lot["route"].astype(str).unique())
     optimized_routes = sorted(optimized_lot["route"].astype(str).unique())
-    total_colors = max(len(current_routes) + len(optimized_routes), 1)
-
     def palette(index: int) -> list[int]:
+        # O passo áureo distancia visualmente rotas vizinhas na lista. A primeira
+        # faixa cobre todos os lotes atuais (até 31 ULs) com máxima saturação;
+        # faixas seguintes variam luminosidade para ampliar a paleta sem tons lavados.
         hue = (index * 0.618033988749895) % 1.0
-        red, green, blue = colorsys.hsv_to_rgb(hue, 0.68, 0.90)
-        return [int(red * 255), int(green * 255), int(blue * 255), 190]
+        band = (index // 32) % 3
+        saturation = (0.94, 0.82, 1.00)[band]
+        value = (0.96, 0.84, 0.91)[band]
+        red, green, blue = colorsys.hsv_to_rgb(hue, saturation, value)
+        return [round(red * 255), round(green * 255), round(blue * 255), 255]
 
     current_colors = {route: palette(index) for index, route in enumerate(current_routes)}
     optimized_colors: dict[str, list[int]] = {}

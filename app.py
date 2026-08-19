@@ -118,7 +118,13 @@ def lot_metric(lot_metrics: pd.DataFrame, lot: int, scenario: str):
 def route_color_frame(frame: pd.DataFrame, colors: dict[str, list[int]]) -> pd.DataFrame:
     result = frame.copy()
     result["route"] = result["route"].astype(str)
-    result["color"] = result["route"].map(colors)
+    fallback = [90, 96, 105, 255]
+    result["color"] = result["route"].map(colors).map(
+        lambda color: color if isinstance(color, list) else fallback
+    )
+    result["outline_color"] = result["color"].map(
+        lambda color: [round(channel * 0.42) for channel in color[:3]] + [245]
+    )
     return result
 
 
@@ -139,6 +145,7 @@ def build_map(
     view_state: pdk.ViewState,
     colors: dict[str, list[int]],
     paths: pd.DataFrame | None = None,
+    show_centroids: bool = False,
 ) -> pdk.Deck:
     map_points = route_color_frame(points, colors)
     map_points["map_label"] = "Instalação " + map_points["installation"].astype(str)
@@ -147,14 +154,14 @@ def build_map(
         "route", "centroid_latitude", "centroid_longitude", "installations"
     ]].copy()
     centroids["route"] = centroids["route"].astype(str)
-    centroids["color"] = centroids["route"].map(colors)
+    centroids = route_color_frame(centroids, colors)
     centroids["map_label"] = "Centroide da UL"
 
-    layers: list[pdk.Layer] = []
+    path_layer: pdk.Layer | None = None
     if paths is not None and not paths.empty:
         map_paths = route_color_frame(paths, colors)
         map_paths["color"] = map_paths["color"].map(
-            lambda color: [*color[:3], 235] if isinstance(color, list) else [242, 142, 43, 235]
+            lambda color: [*color[:3], 255]
         )
         map_paths["map_label"] = map_paths.apply(
             lambda row: (
@@ -164,57 +171,56 @@ def build_map(
             ),
             axis=1,
         )
-        layers.extend([
-            pdk.Layer(
-                "PathLayer",
-                data=map_paths,
-                get_path="path",
-                get_color=[20, 25, 35, 155],
-                get_width=7,
-                width_min_pixels=3,
-                width_max_pixels=8,
-                pickable=False,
-            ),
-            pdk.Layer(
-                "PathLayer",
-                data=map_paths,
-                get_path="path",
-                get_color="color",
-                get_width=4,
-                width_min_pixels=2,
-                width_max_pixels=5,
-                pickable=True,
-                auto_highlight=True,
-            ),
-        ])
+        path_layer = pdk.Layer(
+            "PathLayer",
+            data=map_paths,
+            get_path="path",
+            get_color="color",
+            get_width=3,
+            width_min_pixels=2,
+            width_max_pixels=3.5,
+            joint_rounded=True,
+            cap_rounded=True,
+            pickable=True,
+            auto_highlight=True,
+        )
 
     point_layer = pdk.Layer(
         "ScatterplotLayer",
         data=map_points,
         get_position="[longitude, latitude]",
         get_fill_color="color",
-        get_radius=35,
-        radius_min_pixels=1.5,
-        radius_max_pixels=6,
+        get_line_color="outline_color",
+        stroked=True,
+        line_width_min_pixels=1,
+        get_radius=32,
+        radius_min_pixels=2.2,
+        radius_max_pixels=5.2,
         pickable=True,
         auto_highlight=True,
-        opacity=0.72,
+        opacity=0.82,
     )
     centroid_layer = pdk.Layer(
         "ScatterplotLayer",
         data=centroids,
         get_position="[centroid_longitude, centroid_latitude]",
         get_fill_color="color",
-        get_line_color=[20, 20, 20, 240],
+        get_line_color=[0, 0, 0, 255],
         stroked=True,
-        line_width_min_pixels=2,
-        get_radius=115,
-        radius_min_pixels=6,
-        radius_max_pixels=13,
+        line_width_min_pixels=2.5,
+        get_radius=125,
+        radius_min_pixels=7,
+        radius_max_pixels=14,
         pickable=True,
         opacity=0.98,
     )
-    layers.extend([point_layer, centroid_layer])
+    # A ordem define a prioridade visual: pontos abaixo, traçado por cima e
+    # centroides sempre no primeiro plano.
+    layers: list[pdk.Layer] = [point_layer]
+    if path_layer is not None:
+        layers.append(path_layer)
+    if show_centroids:
+        layers.append(centroid_layer)
     return pdk.Deck(
         layers=layers,
         initial_view_state=view_state,
@@ -435,15 +441,24 @@ with tab_map:
         analysis["route_metrics"]["lot"].eq(selected_lot)
         & analysis["route_metrics"]["scenario"].eq("Otimizada")
     ]
-    show_route_paths = st.toggle(
-        "Exibir traçado por vizinho mais próximo",
-        value=False,
-        key="show_route_paths",
-        help=(
-            "Liga as instalações de cada UL em um caminho aberto: começa no ponto "
-            "mais afastado do centroide e segue para o ponto não visitado mais próximo."
-        ),
-    )
+    map_controls = st.columns(2)
+    with map_controls[0]:
+        show_route_paths = st.toggle(
+            "Exibir traçado por vizinho mais próximo",
+            value=False,
+            key="show_route_paths",
+            help=(
+                "Liga as instalações de cada UL em um caminho aberto: começa no ponto "
+                "mais afastado do centroide e segue para o ponto não visitado mais próximo."
+            ),
+        )
+    with map_controls[1]:
+        show_centroids = st.toggle(
+            "Exibir centroides",
+            value=False,
+            key="show_centroids",
+            help="Mostra o ponto central de cada UL como um círculo maior com borda preta.",
+        )
     current_paths = None
     optimized_paths = None
     if show_route_paths:
@@ -468,7 +483,7 @@ with tab_map:
                 st.pydeck_chart(
                     build_map(
                         current_lot, current_routes, view_state, current_colors,
-                        current_paths,
+                        current_paths, show_centroids=show_centroids,
                     ),
                     width="stretch",
                 )
@@ -480,12 +495,12 @@ with tab_map:
                 st.pydeck_chart(
                     build_map(
                         optimized_lot, optimized_routes, view_state, optimized_colors,
-                        optimized_paths,
+                        optimized_paths, show_centroids=show_centroids,
                     ),
                     width="stretch",
                 )
         st.caption(
-            "Os dois mapas usam o mesmo enquadramento. Nos lotes comparáveis, as cores são alinhadas pela maior sobreposição de instalações, não pelo ID da UL. Os círculos maiores são centroides. Quando ativado, o traçado é uma estimativa aberta por vizinho mais próximo, não uma rota viária real."
+            "Os dois mapas usam o mesmo enquadramento. Nos lotes comparáveis, as cores são alinhadas pela maior sobreposição de instalações, não pelo ID da UL. Quando ativados, os círculos maiores com borda preta são centroides. O traçado é uma estimativa aberta por vizinho mais próximo, não uma rota viária real."
         )
 
 with tab_distribution:
