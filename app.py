@@ -272,7 +272,6 @@ snapshot_path = PROJECT_DIR / Path(DEFAULT_DASHBOARD_SNAPSHOT)
 output_path = PROJECT_DIR / Path(DEFAULT_OUTPUT_FILE)
 
 st.sidebar.title("Comparativo VV")
-st.sidebar.caption("Atualização dos dados somente pelo Run All do notebook analise_rotas.ipynb.")
 
 if not snapshot_path.exists():
     st.error(
@@ -324,9 +323,6 @@ with logo_column:
         st.image(str(COMPANY_LOGO), width="stretch")
 with title_column:
     st.title("Estrutura das rotas: Atual × Roteirizada")
-st.caption(
-    "Comparação por lote e por instalações. As ULs são grupos independentes em cada cenário; seus IDs não são comparados diretamente."
-)
 
 coverage_row = coverage.loc[coverage["lot"].eq(selected_lot)].iloc[0]
 lot_metrics = analysis["lot_metrics"]
@@ -341,10 +337,6 @@ if coverage_row["status"] != "Comparável":
     )
     st.warning(
         f"Lote {selected_lot}: {status_label}. Os indicadores disponíveis são exibidos, mas não há delta comparável."
-    )
-elif coverage_row["current_coverage_pct"] < 0.99999:
-    st.warning(
-        "Os cenários têm coberturas diferentes neste lote. Os indicadores espaciais usam cada cenário completo; a estabilidade usa somente instalações comuns."
     )
 
 kpi_columns = st.columns(5)
@@ -381,9 +373,12 @@ kpi_columns[3].metric(
     delta_color="inverse",
 )
 kpi_columns[4].metric(
-    "Retenção de vínculos",
-    format_percent(None if stability_row is None else stability_row["pair_retention"]),
-    help="Dos vínculos entre instalações que estavam na mesma UL, quantos permanecem após a roteirização.",
+    "Preservação dos grupos",
+    format_percent(None if stability_row is None else stability_row["group_preservation_pct"]),
+    help=(
+        "Percentual de instalações que permaneceram no destino principal de sua UL atual. "
+        "Não depende de igualdade entre IDs de UL."
+    ),
 )
 
 tab_summary, tab_map, tab_distribution, tab_total_distance, tab_regrouping, tab_glossary = st.tabs(
@@ -529,7 +524,7 @@ with tab_distribution:
         display_columns = [
             "scenario", "route", "installations", "nearest_mean_km",
             "nearest_median_km", "nearest_max_km",
-            "radius_mean_km", "route_to_lot_centroid_km", "separation_index",
+            "radius_mean_km", "route_to_lot_centroid_km",
         ]
         table = route_selected[display_columns].sort_values(
             "nearest_mean_km", ascending=False
@@ -542,7 +537,6 @@ with tab_distribution:
             "nearest_max_km": "Máxima",
             "radius_mean_km": "Raio médio",
             "route_to_lot_centroid_km": "Centroide UL-lote",
-            "separation_index": "Índice de separação",
         })
         table["Cenário"] = table["Cenário"].replace(
             {"Otimizada": "Roteirizada"}
@@ -677,12 +671,29 @@ with tab_regrouping:
     if stability_row is None:
         st.info("A análise de reagrupamento exige que o lote exista nos dois cenários.")
     else:
-        group_kpis = st.columns(5)
-        group_kpis[0].metric("Vínculos mantidos", format_integer(stability_row["retained_pairs"]))
-        group_kpis[1].metric("Vínculos separados", format_integer(stability_row["separated_pairs"]))
-        group_kpis[2].metric("Novos vínculos", format_integer(stability_row["newly_grouped_pairs"]))
-        group_kpis[3].metric("Jaccard", format_percent(stability_row["pair_jaccard"]))
-        group_kpis[4].metric("ARI", format_number(stability_row["ari"], 3))
+        group_kpis = st.columns(4)
+        group_kpis[0].metric(
+            "Instalações analisadas",
+            format_integer(stability_row["common_installations"]),
+        )
+        group_kpis[1].metric(
+            "Instalações preservadas",
+            format_integer(stability_row["preserved_installations"]),
+            help="Instalações que permaneceram no destino principal de sua UL atual.",
+        )
+        group_kpis[2].metric(
+            "Instalações redistribuídas",
+            format_integer(stability_row["redistributed_installations"]),
+            help="Instalações enviadas para destinos diferentes do destino principal de sua UL atual.",
+        )
+        group_kpis[3].metric(
+            "Preservação dos grupos",
+            format_percent(stability_row["group_preservation_pct"]),
+        )
+        st.caption(
+            "Para cada UL atual, o destino principal é a UL roteirizada que recebeu a maior quantidade de suas instalações. "
+            "Preservadas + redistribuídas = instalações analisadas."
+        )
         heatmap_data = transitions_lot.copy()
         heatmap_data["current_route"] = heatmap_data["current_route"].astype(str)
         heatmap_data["optimized_route"] = heatmap_data["optimized_route"].astype(str)
@@ -700,24 +711,34 @@ with tab_regrouping:
         st.altair_chart(heatmap, width="stretch")
         fragmentation = analysis["fragmentation"].loc[
             analysis["fragmentation"]["lot"].eq(selected_lot)
-        ].sort_values("separated_pairs_pct", ascending=False)
-        st.markdown("#### ULs atuais mais fragmentadas")
+        ].sort_values("redistributed_installations_pct", ascending=False)
+        st.markdown("#### Redistribuição por UL atual")
+        fragmentation_table = fragmentation[[
+            "current_route",
+            "common_installations",
+            "optimized_routes_received",
+            "dominant_optimized_route",
+            "dominant_installations",
+            "dominant_share",
+            "redistributed_installations",
+            "redistributed_installations_pct",
+        ]].rename(columns={
+            "current_route": "UL atual",
+            "common_installations": "Instalações analisadas",
+            "optimized_routes_received": "ULs roteirizadas recebidas",
+            "dominant_optimized_route": "Destino principal",
+            "dominant_installations": "Instalações no destino principal",
+            "dominant_share": "Participação dominante",
+            "redistributed_installations": "Instalações redistribuídas",
+            "redistributed_installations_pct": "Redistribuídas %",
+        })
         st.dataframe(
-            fragmentation.rename(columns={
-                "current_route": "UL atual",
-                "common_installations": "Instalações comuns",
-                "optimized_routes_received": "ULs roteirizadas recebidas",
-                "dominant_optimized_route": "UL dominante",
-                "dominant_share": "Participação dominante",
-                "fragmentation_index": "Índice de fragmentação",
-                "separated_pairs": "Vínculos separados",
-                "separated_pairs_pct": "Vínculos separados %",
-            }),
+            fragmentation_table,
             hide_index=True,
             width="stretch",
             column_config={
                 "Participação dominante": st.column_config.ProgressColumn(format="percent"),
-                "Vínculos separados %": st.column_config.ProgressColumn(format="percent"),
+                "Redistribuídas %": st.column_config.ProgressColumn(format="percent"),
             },
         )
 
@@ -759,8 +780,8 @@ with tab_glossary:
         },
         {
             "Aba": "Reagrupamento",
-            "O que apresenta": "Matriz de transição, retenção de vínculos e fragmentação das ULs atuais.",
-            "Como analisar": "Identifique quais grupos permaneceram juntos, quais foram separados e para quantas ULs roteirizadas cada UL atual foi distribuída.",
+            "O que apresenta": "Matriz de transição, preservação de instalações e fragmentação das ULs atuais.",
+            "Como analisar": "Confira quantas instalações ficaram no destino principal de sua UL atual e quantas foram redistribuídas para outras ULs roteirizadas.",
         },
         {
             "Aba": "Glossário",
@@ -817,19 +838,9 @@ with tab_glossary:
             "Leitura": "Valores maiores geralmente indicam grupos mais separados em relação à dispersão interna.",
         },
         {
-            "Indicador": "Retenção de vínculos",
-            "Definição": "Percentual dos vínculos entre instalações que permanecem na mesma UL após a roteirização.",
-            "Leitura": "Valor alto significa maior preservação da estrutura anterior; não significa necessariamente melhor compactação.",
-        },
-        {
-            "Indicador": "Jaccard",
-            "Definição": "Similaridade entre os vínculos de agrupamento nos dois cenários.",
-            "Leitura": "Varia de 0 a 1. Quanto mais próximo de 1, mais semelhantes são os agrupamentos.",
-        },
-        {
-            "Indicador": "ARI",
-            "Definição": "Índice de Rand ajustado ao acaso para comparar as duas estruturas de agrupamento.",
-            "Leitura": "Próximo de 1 indica estruturas semelhantes; próximo de 0 indica semelhança equivalente ao acaso; pode ser negativo.",
+            "Indicador": "Preservação dos grupos",
+            "Definição": "Percentual de instalações que permaneceram no destino principal de sua UL atual.",
+            "Leitura": "Para cada UL atual, considera-se principal a UL roteirizada que recebeu mais instalações. Preservadas e redistribuídas sempre fecham o total analisado.",
         },
         {
             "Indicador": "Fragmentação",

@@ -13,7 +13,6 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 from scipy.optimize import linear_sum_assignment
-from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
 
 
 EARTH_RADIUS_KM = 6371.0088
@@ -22,7 +21,7 @@ DEFAULT_CURRENT_FILE = Path("Rotas_Atuais_VV_Completo.xlsx")
 DEFAULT_OPTIMIZED_FILE = Path("Rota_Pronta_VV_Consolidado.xlsx")
 DEFAULT_OUTPUT_FILE = Path("outputs/Comparativo_Rotas_VV.xlsx")
 DEFAULT_DASHBOARD_SNAPSHOT = Path("outputs/dashboard_snapshot.pkl.gz")
-DASHBOARD_SNAPSHOT_VERSION = 3
+DASHBOARD_SNAPSHOT_VERSION = 4
 
 
 @dataclass
@@ -537,6 +536,7 @@ def compute_group_comparison(
     transition_frames: list[pd.DataFrame] = []
     stability_records: list[dict[str, Any]] = []
     fragmentation_records: list[dict[str, Any]] = []
+    classification_frames: list[pd.DataFrame] = []
 
     comparable_lots = sorted(current_lots & optimized_lots)
     current_match = current.loc[current["lot"].isin(comparable_lots), [
@@ -637,41 +637,67 @@ def compute_group_comparison(
         transition["share_optimized_route"] = (
             transition["installations"] / transition["optimized_route_installations"]
         )
-        transition["retained_pairs_in_cell"] = (
-            transition["installations"] * (transition["installations"] - 1) // 2
-        ).astype(np.int64)
+        dominant_indices = transition.groupby("current_route")["installations"].idxmax()
+        dominant_destinations = transition.loc[
+            dominant_indices, ["current_route", "optimized_route", "installations"]
+        ].rename(columns={
+            "optimized_route": "dominant_optimized_route",
+            "installations": "dominant_installations",
+        })
+        transition = transition.merge(
+            dominant_destinations[["current_route", "dominant_optimized_route"]],
+            on="current_route",
+            how="left",
+        )
+        transition["is_dominant_destination"] = transition["optimized_route"].eq(
+            transition["dominant_optimized_route"]
+        )
         transition_frames.append(transition)
 
-        old_pairs = int(((current_sizes * (current_sizes - 1)) // 2).sum())
-        new_pairs = int(((optimized_sizes * (optimized_sizes - 1)) // 2).sum())
-        retained_pairs = int(transition["retained_pairs_in_cell"].sum())
-        separated_pairs = old_pairs - retained_pairs
-        newly_grouped_pairs = new_pairs - retained_pairs
-        union_pairs = old_pairs + new_pairs - retained_pairs
+        classified_common = common.merge(
+            dominant_destinations[["current_route", "dominant_optimized_route"]],
+            left_on="route_current",
+            right_on="current_route",
+            how="left",
+            validate="many_to_one",
+        )
+        classified_common["group_status"] = np.where(
+            classified_common["route_optimized"].eq(
+                classified_common["dominant_optimized_route"]
+            ),
+            "Preservada no destino principal",
+            "Redistribuída para outra UL",
+        )
+        classification_frames.append(
+            classified_common[[
+                "lot", "installation", "dominant_optimized_route", "group_status"
+            ]]
+        )
+
+        preserved_installations = int(dominant_destinations["dominant_installations"].sum())
+        redistributed_installations = int(len(common) - preserved_installations)
+        fragmented_current_routes = int(
+            (transition.groupby("current_route")["optimized_route"].nunique() > 1).sum()
+        )
         stability_records.append(
             {
                 "lot": int(lot),
                 "common_installations": int(len(common)),
-                "current_pairs": old_pairs,
-                "optimized_pairs": new_pairs,
-                "retained_pairs": retained_pairs,
-                "separated_pairs": separated_pairs,
-                "newly_grouped_pairs": newly_grouped_pairs,
-                "pair_retention": retained_pairs / old_pairs if old_pairs else np.nan,
-                "pair_precision": retained_pairs / new_pairs if new_pairs else np.nan,
-                "pair_jaccard": retained_pairs / union_pairs if union_pairs else np.nan,
-                "ari": float(adjusted_rand_score(common["route_current"], common["route_optimized"])),
-                "nmi": float(
-                    normalized_mutual_info_score(common["route_current"], common["route_optimized"])
+                "preserved_installations": preserved_installations,
+                "redistributed_installations": redistributed_installations,
+                "group_preservation_pct": (
+                    preserved_installations / len(common) if len(common) else np.nan
                 ),
+                "current_routes_analyzed": int(current_sizes.size),
+                "fragmented_current_routes": fragmented_current_routes,
             }
         )
 
         for current_route, group in transition.groupby("current_route", sort=True):
             route_total = int(group["current_route_installations"].iloc[0])
             dominant_row = group.loc[group["installations"].idxmax()]
-            route_pairs = route_total * (route_total - 1) // 2
-            retained_in_route = int(group["retained_pairs_in_cell"].sum())
+            dominant_installations = int(dominant_row["installations"])
+            redistributed_installations_route = route_total - dominant_installations
             probabilities = group["installations"].to_numpy(float) / route_total
             fragmentation_records.append(
                 {
@@ -680,12 +706,12 @@ def compute_group_comparison(
                     "common_installations": route_total,
                     "optimized_routes_received": int(group["optimized_route"].nunique()),
                     "dominant_optimized_route": str(dominant_row["optimized_route"]),
-                    "dominant_installations": int(dominant_row["installations"]),
-                    "dominant_share": float(dominant_row["installations"] / route_total),
+                    "dominant_installations": dominant_installations,
+                    "dominant_share": float(dominant_installations / route_total),
                     "fragmentation_index": float(1.0 - np.sum(probabilities**2)),
-                    "separated_pairs": route_pairs - retained_in_route,
-                    "separated_pairs_pct": (
-                        (route_pairs - retained_in_route) / route_pairs if route_pairs else 0.0
+                    "redistributed_installations": redistributed_installations_route,
+                    "redistributed_installations_pct": (
+                        redistributed_installations_route / route_total if route_total else 0.0
                     ),
                 }
             )
@@ -697,9 +723,23 @@ def compute_group_comparison(
             columns=[
                 "current_route", "optimized_route", "installations",
                 "current_route_installations", "optimized_route_installations", "lot",
-                "share_current_route", "share_optimized_route", "retained_pairs_in_cell",
+                "share_current_route", "share_optimized_route", "dominant_optimized_route",
+                "is_dominant_destination",
             ]
         )
+    )
+    classifications = (
+        pd.concat(classification_frames, ignore_index=True)
+        if classification_frames
+        else pd.DataFrame(columns=[
+            "lot", "installation", "dominant_optimized_route", "group_status"
+        ])
+    )
+    installation_match = installation_match.merge(
+        classifications,
+        on=["lot", "installation"],
+        how="left",
+        validate="one_to_one",
     )
     return {
         "coverage": pd.DataFrame(coverage_records),
@@ -970,9 +1010,7 @@ def _write_dataframe(
         if len(dataframe):
             for row_index in range(first_data_row, last_data_row + 1):
                 cell = worksheet.cell(row_index, column_index)
-                if "%" in str(column) or "percentual" in column_name or "share" in column_name or column_name in {
-                    "retenção de vínculos", "precisão de vínculos", "jaccard", "ari", "nmi"
-                }:
+                if "%" in str(column) or "percentual" in column_name or "share" in column_name:
                     cell.number_format = "0.0%"
                 elif "km" in column_name:
                     cell.number_format = "0.000"
@@ -1028,11 +1066,10 @@ def _summary_export(analysis: dict[str, Any]) -> pd.DataFrame:
             "Centroide UL-lote atual km": comparison["current_route_to_lot_centroid_mean_km"],
             "Centroide UL-lote otimizada km": comparison["optimized_route_to_lot_centroid_mean_km"],
             "Delta centroide UL-lote km": comparison["route_to_lot_centroid_mean_km_delta"],
-            "Retenção de vínculos": comparison["pair_retention"],
-            "Precisão de vínculos": comparison["pair_precision"],
-            "Jaccard": comparison["pair_jaccard"],
-            "ARI": comparison["ari"],
-            "NMI": comparison["nmi"],
+            "Instalações preservadas": comparison["preserved_installations"],
+            "Instalações redistribuídas": comparison["redistributed_installations"],
+            "Preservação dos grupos %": comparison["group_preservation_pct"],
+            "ULs atuais fragmentadas": comparison["fragmented_current_routes"],
         }
     )
     return result
@@ -1080,7 +1117,7 @@ def build_workbook(analysis: dict[str, Any]) -> Any:
         FormulaRule(formula=[f'$B{header_row + 1}="Comparável"'], fill=green_fill),
     )
     ws.conditional_formatting.add(
-        f"T{header_row + 1}:V{last_row}",
+        f"V{header_row + 1}:V{last_row}",
         ColorScaleRule(start_type="min", start_color="F8696B", mid_type="percentile", mid_value=50,
                        mid_color="FFEB84", end_type="max", end_color="63BE7B"),
     )
@@ -1103,7 +1140,8 @@ def build_workbook(analysis: dict[str, Any]) -> Any:
         "optimized_route_installations": "Total da UL otimizada",
         "share_current_route": "Participação na UL atual %",
         "share_optimized_route": "Participação na UL otimizada %",
-        "retained_pairs_in_cell": "Vínculos mantidos na célula",
+        "dominant_optimized_route": "Destino principal da UL atual",
+        "is_dominant_destination": "É o destino principal?",
     }
     ws = workbook.create_sheet("Transicoes_UL")
     _write_dataframe(
@@ -1117,16 +1155,11 @@ def build_workbook(analysis: dict[str, Any]) -> Any:
     stability = analysis["stability"].rename(columns={
         "lot": "Lote",
         "common_installations": "Instalações comuns",
-        "current_pairs": "Vínculos atuais",
-        "optimized_pairs": "Vínculos roteirizados",
-        "retained_pairs": "Vínculos mantidos",
-        "separated_pairs": "Vínculos separados",
-        "newly_grouped_pairs": "Novos vínculos",
-        "pair_retention": "Retenção de vínculos",
-        "pair_precision": "Precisão de vínculos",
-        "pair_jaccard": "Jaccard",
-        "ari": "ARI",
-        "nmi": "NMI",
+        "preserved_installations": "Instalações preservadas",
+        "redistributed_installations": "Instalações redistribuídas",
+        "group_preservation_pct": "Preservação dos grupos %",
+        "current_routes_analyzed": "ULs atuais analisadas",
+        "fragmented_current_routes": "ULs atuais fragmentadas",
     })
     fragmentation = analysis["fragmentation"].rename(columns={
         "lot": "Lote",
@@ -1137,8 +1170,8 @@ def build_workbook(analysis: dict[str, Any]) -> Any:
         "dominant_installations": "Instalações no grupo dominante",
         "dominant_share": "Participação dominante %",
         "fragmentation_index": "Índice de fragmentação",
-        "separated_pairs": "Vínculos separados",
-        "separated_pairs_pct": "Vínculos separados %",
+        "redistributed_installations": "Instalações redistribuídas",
+        "redistributed_installations_pct": "Instalações redistribuídas %",
     })
     ws = workbook.create_sheet("Estabilidade")
     _, stability_end = _write_dataframe(
@@ -1153,7 +1186,7 @@ def build_workbook(analysis: dict[str, Any]) -> Any:
         ws,
         fragmentation,
         "Fragmentação das ULs atuais",
-        "Quanto menor a fragmentação e o percentual de vínculos separados, maior a continuidade do grupo.",
+        "Preservadas e redistribuídas são contagens de instalações; juntas, fecham o total comum de cada UL atual.",
         start_row=second_start,
     )
     ws.freeze_panes = "A4"
@@ -1213,6 +1246,8 @@ def build_workbook(analysis: dict[str, Any]) -> Any:
         "optimized_longitude": "Longitude otimizada",
         "status": "Status",
         "coordinate_difference_m": "Diferença de coordenada m",
+        "dominant_optimized_route": "Destino principal da UL atual",
+        "group_status": "Situação no reagrupamento",
     })
     ws = workbook.create_sheet("Instalacoes_Match")
     _write_dataframe(
@@ -1228,11 +1263,9 @@ def build_workbook(analysis: dict[str, Any]) -> Any:
         ("Instalação-centroide", "Distância entre cada instalação e a média de latitude/longitude das instalações de sua UL."),
         ("Centroide UL-lote", "Distância do centroide da UL ao centroide do lote no mesmo cenário."),
         ("Índice de separação", "Distância ao centroide de UL mais próximo dividida pelo raio médio da UL; valores maiores indicam melhor separação."),
-        ("Retenção de vínculos", "Percentual dos vínculos entre instalações que permanecem na mesma UL após a roteirização."),
-        ("Precisão de vínculos", "Percentual dos vínculos da estrutura roteirizada que também existiam na estrutura atual."),
-        ("Jaccard", "Interseção sobre união das relações de coagrupamento atual e otimizada."),
-        ("ARI", "Adjusted Rand Index entre os dois agrupamentos, calculado somente nas instalações comuns do lote."),
-        ("NMI", "Normalized Mutual Information entre os agrupamentos, calculada somente nas instalações comuns do lote."),
+        ("Instalações preservadas", "Instalações que permaneceram na UL roteirizada que recebeu a maior parte de sua UL atual."),
+        ("Instalações redistribuídas", "Instalações enviadas para ULs diferentes do destino principal de sua UL atual."),
+        ("Preservação dos grupos", "Instalações preservadas divididas pelas instalações comuns analisadas; não compara IDs de UL diretamente."),
         ("Índice de fragmentação", "1 menos a soma dos quadrados das participações de uma UL atual nas ULs otimizadas."),
         ("Cobertura atual", "Instalações comuns divididas pelas instalações existentes no cenário atual do lote."),
         ("Escopo", "Indicadores espaciais usam o cenário completo disponível; estabilidade usa somente instalações comuns no mesmo lote."),
