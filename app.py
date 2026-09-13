@@ -381,8 +381,8 @@ kpi_columns[4].metric(
     ),
 )
 
-tab_summary, tab_map, tab_distribution, tab_total_distance, tab_regrouping, tab_glossary = st.tabs(
-    ["Resumo", "Mapa", "Dispersão", "Percurso total", "Reagrupamento", "Glossário"]
+tab_summary, tab_map, tab_routed_map, tab_distribution, tab_total_distance, tab_regrouping, tab_glossary = st.tabs(
+    ["Resumo", "Mapa", "Mapa Roteirizado", "Dispersão", "Percurso total", "Reagrupamento", "Glossário"]
 )
 
 with tab_summary:
@@ -497,6 +497,76 @@ with tab_map:
         st.caption(
             "Os dois mapas usam o mesmo enquadramento. Nos lotes comparáveis, as cores são alinhadas pela maior sobreposição de instalações, não pelo ID da UL. Quando ativados, os círculos maiores com borda preta são centroides. O traçado é uma estimativa aberta por vizinho mais próximo, não uma rota viária real."
         )
+
+with tab_routed_map:
+    if optimized_lot.empty:
+        st.info("O lote ainda não foi incluído no arquivo roteirizado.")
+    else:
+        st.subheader(f"Mapa roteirizado — Lote {selected_lot}")
+        route_options = sorted(
+            optimized_lot["route"].astype(str).unique().tolist(),
+            key=natural_route_key,
+        )
+        routed_map_controls = st.columns([2.4, 1.6, 1])
+        with routed_map_controls[0]:
+            selected_map_routes = st.multiselect(
+                "Rotas do lote",
+                route_options,
+                default=[],
+                format_func=lambda route: f"Rota {route}",
+                placeholder="Todas as rotas — selecione para filtrar",
+                key=f"routed_map_routes_{selected_lot}",
+                help="Selecione uma ou várias rotas. Sem seleção, todas as rotas do lote são exibidas.",
+            )
+        with routed_map_controls[1]:
+            routed_map_show_paths = st.toggle(
+                "Exibir traçado",
+                value=False,
+                key="routed_map_show_paths",
+                help="Exibe o caminho aberto por vizinho mais próximo somente das rotas selecionadas.",
+            )
+        with routed_map_controls[2]:
+            routed_map_show_centroids = st.toggle(
+                "Exibir centroides",
+                value=False,
+                key="routed_map_show_centroids",
+                help="Mostra os centroides somente das rotas selecionadas.",
+            )
+
+        visible_map_routes = selected_map_routes or route_options
+        routed_map_points = optimized_lot.loc[
+            optimized_lot["route"].astype(str).isin(visible_map_routes)
+        ]
+        routed_map_metrics = optimized_routes.loc[
+            optimized_routes["route"].astype(str).isin(visible_map_routes)
+        ]
+        routed_map_paths = None
+        if routed_map_show_paths:
+            with st.spinner("Montando os traçados das rotas selecionadas..."):
+                routed_map_paths = load_path_overlay(routed_map_points)
+
+        routed_map_view = calculate_view_state(
+            routed_map_points, routed_map_points.iloc[:0]
+        )
+        st.caption(
+            f"{format_integer(len(visible_map_routes))} de {format_integer(len(route_options))} rotas "
+            f"• {format_integer(len(routed_map_points))} instalações. "
+            "O enquadramento acompanha a seleção; as cores permanecem iguais às da aba Mapa."
+        )
+        st.pydeck_chart(
+            build_map(
+                routed_map_points,
+                routed_map_metrics,
+                routed_map_view,
+                optimized_colors,
+                routed_map_paths,
+                show_centroids=routed_map_show_centroids,
+            ),
+            width="stretch",
+            height=750,
+            key=f"routed_map_chart_{selected_lot}",
+        )
+        st.caption("O traçado é uma estimativa por vizinho mais próximo, não uma rota viária real.")
 
 with tab_distribution:
     route_selected = analysis["route_metrics"].loc[
@@ -750,9 +820,10 @@ with tab_glossary:
         2. Use a distância de **Vizinho mais próximo** para avaliar a proximidade local entre instalações e identificar pontos isolados.
         3. No **Resumo**, verifique se a redução de rotas ocorreu junto com redução das distâncias e do raio médio.
         4. Use **Mapa** e **Dispersão** para localizar ULs extensas, instalações isoladas e valores extremos escondidos pela média. No mapa, ative o traçado para evidenciar saltos longos dentro da UL.
-        5. Em **Percurso total**, compare a soma das sequências estimadas por Haversine e por projeção métrica do GeoPandas.
-        6. Em **Reagrupamento**, quantifique quanto da composição anterior foi preservada ou reorganizada.
-        7. Considere melhora quando houver mais compactação e equilíbrio sem perda relevante de cobertura. Nenhum indicador deve ser analisado isoladamente.
+        5. Use **Mapa Roteirizado** para inspecionar uma ou várias rotas em um mapa ampliado, com controles independentes de traçado e centroides.
+        6. Em **Percurso total**, compare a soma das sequências estimadas por Haversine e por projeção métrica do GeoPandas.
+        7. Em **Reagrupamento**, quantifique quanto da composição anterior foi preservada ou reorganizada.
+        8. Considere melhora quando houver mais compactação e equilíbrio sem perda relevante de cobertura. Nenhum indicador deve ser analisado isoladamente.
         """
     )
 
@@ -767,6 +838,11 @@ with tab_glossary:
             "Aba": "Mapa",
             "O que apresenta": "Distribuição geográfica das instalações e centroides, com traçado opcional por vizinho mais próximo.",
             "Como analisar": "Ative o traçado e procure segmentos muito longos, que evidenciam instalações isoladas ou descontinuidades. As cores são alinhadas por sobreposição, não pelo ID da UL.",
+        },
+        {
+            "Aba": "Mapa Roteirizado",
+            "O que apresenta": "Mapa ampliado somente da estrutura roteirizada, com seleção de rotas e camadas opcionais de traçado e centroides.",
+            "Como analisar": "Selecione uma ou várias rotas para focar seus detalhes. Limpe a seleção para voltar ao lote completo. As cores são mantidas e o enquadramento acompanha as rotas exibidas.",
         },
         {
             "Aba": "Dispersão",
