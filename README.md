@@ -10,7 +10,11 @@ Dashboard e relatório para comparar a estrutura espacial das rotas atuais com o
 4. O Streamlit apenas lê os resultados já processados em `outputs/dashboard_snapshot.pkl.gz`. Após o **Run All**, atualize a página do navegador.
 5. Para atualizar a versão online, execute `publicar_dashboard.bat` depois do **Run All**.
 
+Na aba **Mapa**, o filtro **MRUs roteirizadas** seleciona uma ou várias rotas e mostra, na estrutura Atual, as mesmas instalações nas suas rotas antigas. Limpe a seleção para ver o lote completo. Os dois mapas usam o mesmo componente da aba **Mapa Roteirizado** e iniciam no mesmo enquadramento, com zoom e deslocamento independentes. Traçados e centroides consideram somente os pontos visíveis. A aba **Mapa Roteirizado** mantém seu filtro independente. Alterações apenas de interface não exigem Run All.
+
 O Excel final é salvo em `outputs/Comparativo_Rotas_VV.xlsx` e pode ser baixado pelo dashboard, sem recalcular os dados.
+
+Os mapas e seus traçados só são preparados quando a respectiva aba está aberta. Trocar de aba preserva os filtros; a transferência dos mapas usa JSON compacto, mantendo todas as instalações e os segmentos dos traçados.
 
 ## Inicialização pelo Windows
 

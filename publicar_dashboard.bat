@@ -34,7 +34,7 @@ if not exist "outputs\Comparativo_Rotas_VV.xlsx" (
     exit /b 1
 )
 
-"%GIT_EXE%" add -- ".gitignore" ".streamlit/config.toml" "README.md" "app.py" "route_analysis.py" "requirements.txt" "configurar_github.bat" "publicar_dashboard.bat" "assets/Logo Engelmig.jpg" "outputs/dashboard_snapshot.pkl.gz" "outputs/Comparativo_Rotas_VV.xlsx"
+"%GIT_EXE%" add -- ".gitignore" ".streamlit/config.toml" "README.md" "app.py" "route_analysis.py" "map_comparison.py" "requirements.txt" "configurar_github.bat" "publicar_dashboard.bat" "assets/Logo Engelmig.jpg" "outputs/dashboard_snapshot.pkl.gz" "outputs/Comparativo_Rotas_VV.xlsx"
 if errorlevel 1 goto falha
 
 "%GIT_EXE%" diff --cached --quiet

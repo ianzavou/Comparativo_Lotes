@@ -9,6 +9,8 @@ import pandas as pd
 import pydeck as pdk
 import streamlit as st
 
+from map_comparison import CompactDeck, select_comparison_points, visible_centroids
+
 import route_analysis as route_analysis_module
 
 
@@ -147,7 +149,9 @@ def build_map(
     paths: pd.DataFrame | None = None,
     show_centroids: bool = False,
 ) -> pdk.Deck:
-    map_points = route_color_frame(points, colors)
+    map_points = route_color_frame(
+        points[["route", "installation", "latitude", "longitude"]], colors
+    )
     map_points["map_label"] = "Instalação " + map_points["installation"].astype(str)
     map_points["installations"] = 1
     centroids = routes[[
@@ -171,8 +175,13 @@ def build_map(
             ),
             axis=1,
         )
+        map_paths = map_paths[[
+            "route", "path", "installations", "map_label", "color",
+            "from_installation", "to_installation",
+        ]]
         path_layer = pdk.Layer(
             "PathLayer",
+            id="nearest-neighbor-paths",
             data=map_paths,
             get_path="path",
             get_color="color",
@@ -187,6 +196,7 @@ def build_map(
 
     point_layer = pdk.Layer(
         "ScatterplotLayer",
+        id="installations",
         data=map_points,
         get_position="[longitude, latitude]",
         get_fill_color="color",
@@ -202,6 +212,7 @@ def build_map(
     )
     centroid_layer = pdk.Layer(
         "ScatterplotLayer",
+        id="route-centroids",
         data=centroids,
         get_position="[centroid_longitude, centroid_latitude]",
         get_fill_color="color",
@@ -221,7 +232,7 @@ def build_map(
         layers.append(path_layer)
     if show_centroids:
         layers.append(centroid_layer)
-    return pdk.Deck(
+    return CompactDeck(
         layers=layers,
         initial_view_state=view_state,
         map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
@@ -382,7 +393,9 @@ kpi_columns[4].metric(
 )
 
 tab_summary, tab_map, tab_routed_map, tab_distribution, tab_total_distance, tab_regrouping, tab_glossary = st.tabs(
-    ["Resumo", "Mapa", "Mapa Roteirizado", "Dispersão", "Percurso total", "Reagrupamento", "Glossário"]
+    ["Resumo", "Mapa", "Mapa Roteirizado", "Dispersão", "Percurso total", "Reagrupamento", "Glossário"],
+    key="analysis_tab",
+    on_change="rerun",
 )
 
 with tab_summary:
@@ -428,14 +441,27 @@ with tab_map:
     current_lot = analysis["current"].loc[analysis["current"]["lot"].eq(selected_lot)]
     optimized_lot = analysis["optimized"].loc[analysis["optimized"]["lot"].eq(selected_lot)]
     transitions_lot = analysis["transitions"].loc[analysis["transitions"]["lot"].eq(selected_lot)]
-    current_routes = analysis["route_metrics"].loc[
-        analysis["route_metrics"]["lot"].eq(selected_lot)
-        & analysis["route_metrics"]["scenario"].eq("Atual")
-    ]
     optimized_routes = analysis["route_metrics"].loc[
         analysis["route_metrics"]["lot"].eq(selected_lot)
         & analysis["route_metrics"]["scenario"].eq("Otimizada")
     ]
+    current_colors, optimized_colors = aligned_route_colors(
+        current_lot, optimized_lot, transitions_lot
+    )
+    selected_comparison_routes = []
+    if not optimized_lot.empty:
+        selected_comparison_routes = st.multiselect(
+            "MRUs roteirizadas",
+            sorted(optimized_lot["route"].astype(str).unique(), key=natural_route_key),
+            default=[],
+            format_func=lambda route: f"MRU {route}",
+            placeholder="Todas as MRUs — selecione para filtrar os dois mapas",
+            key=f"comparison_map_routes_{selected_lot}",
+            help="Na Atual, mostra as mesmas instalações nas suas rotas antigas. Sem seleção, exibe o lote completo.",
+        )
+    current_map_points, optimized_map_points = select_comparison_points(
+        current_lot, optimized_lot, selected_comparison_routes
+    )
     map_controls = st.columns(2)
     with map_controls[0]:
         show_route_paths = st.toggle(
@@ -452,50 +478,59 @@ with tab_map:
             "Exibir centroides",
             value=False,
             key="show_centroids",
-            help="Mostra o ponto central de cada UL como um círculo maior com borda preta.",
+            help="Mostra o centro dos pontos visíveis de cada UL como um círculo maior com borda preta.",
         )
     current_paths = None
     optimized_paths = None
-    if show_route_paths:
+    if tab_map.open and show_route_paths:
         with st.spinner("Montando os traçados das ULs..."):
-            if not current_lot.empty:
-                current_paths = load_path_overlay(current_lot)
-            if not optimized_lot.empty:
-                optimized_paths = load_path_overlay(optimized_lot)
+            if not current_map_points.empty:
+                current_paths = load_path_overlay(current_map_points)
+            if not optimized_map_points.empty:
+                optimized_paths = load_path_overlay(optimized_map_points)
     if current_lot.empty and optimized_lot.empty:
         st.info("Não há coordenadas disponíveis para este lote.")
-    else:
-        view_state = calculate_view_state(current_lot, optimized_lot)
-        current_colors, optimized_colors = aligned_route_colors(
-            current_lot, optimized_lot, transitions_lot
-        )
-        columns = st.columns(2)
-        with columns[0]:
-            st.markdown("#### Atual")
-            if current_lot.empty:
-                st.info("Sem base atual para o lote.")
-            else:
+    elif tab_map.open:
+        view_state = calculate_view_state(current_map_points, optimized_map_points)
+        current_message = ""
+        if current_map_points.empty:
+            current_message = (
+                "Nenhuma instalação selecionada foi encontrada na estrutura atual deste lote."
+                if selected_comparison_routes else "Sem base atual para o lote."
+            )
+        optimized_message = "O lote ainda não foi incluído no arquivo roteirizado." if optimized_map_points.empty else ""
+        if selected_comparison_routes:
+            st.caption(
+                f"{format_integer(len(selected_comparison_routes))} MRUs selecionadas · "
+                f"{format_integer(len(current_map_points))} instalações na Atual · "
+                f"{format_integer(len(optimized_map_points))} na Roteirizada. "
+                "A correspondência usa as instalações, mantendo suas rotas antigas na Atual."
+            )
+        map_columns = st.columns(2)
+        for column, title, points, colors, paths, message, scenario_key in (
+            (map_columns[0], "Atual", current_map_points, current_colors,
+             current_paths, current_message, "current"),
+            (map_columns[1], "Roteirizada", optimized_map_points, optimized_colors,
+             optimized_paths, optimized_message, "optimized"),
+        ):
+            with column:
+                st.markdown(f"#### {title}")
                 st.pydeck_chart(
                     build_map(
-                        current_lot, current_routes, view_state, current_colors,
-                        current_paths, show_centroids=show_centroids,
+                        points, visible_centroids(points), view_state, colors,
+                        paths, show_centroids=show_centroids,
                     ),
                     width="stretch",
+                    height=540,
+                    key=f"comparison_map_{scenario_key}_{selected_lot}",
                 )
-        with columns[1]:
-            st.markdown("#### Roteirizada")
-            if optimized_lot.empty:
-                st.info("O lote ainda não foi incluído no arquivo roteirizado.")
-            else:
-                st.pydeck_chart(
-                    build_map(
-                        optimized_lot, optimized_routes, view_state, optimized_colors,
-                        optimized_paths, show_centroids=show_centroids,
-                    ),
-                    width="stretch",
-                )
+                if message:
+                    st.info(message)
         st.caption(
-            "Os dois mapas usam o mesmo enquadramento. Nos lotes comparáveis, as cores são alinhadas pela maior sobreposição de instalações, não pelo ID da UL. Quando ativados, os círculos maiores com borda preta são centroides. O traçado é uma estimativa aberta por vizinho mais próximo, não uma rota viária real."
+            "Os mapas iniciam no mesmo enquadramento; zoom e deslocamento são independentes. "
+            "As cores permanecem as do lote completo. "
+            "Centroides e traçados consideram somente os pontos visíveis de cada UL. "
+            "O traçado é uma estimativa por vizinho mais próximo, não uma rota viária real."
         )
 
 with tab_routed_map:
@@ -541,7 +576,7 @@ with tab_routed_map:
             optimized_routes["route"].astype(str).isin(visible_map_routes)
         ]
         routed_map_paths = None
-        if routed_map_show_paths:
+        if tab_routed_map.open and routed_map_show_paths:
             with st.spinner("Montando os traçados das rotas selecionadas..."):
                 routed_map_paths = load_path_overlay(routed_map_points)
 
@@ -553,19 +588,20 @@ with tab_routed_map:
             f"• {format_integer(len(routed_map_points))} instalações. "
             "O enquadramento acompanha a seleção; as cores permanecem iguais às da aba Mapa."
         )
-        st.pydeck_chart(
-            build_map(
-                routed_map_points,
-                routed_map_metrics,
-                routed_map_view,
-                optimized_colors,
-                routed_map_paths,
-                show_centroids=routed_map_show_centroids,
-            ),
-            width="stretch",
-            height=750,
-            key=f"routed_map_chart_{selected_lot}",
-        )
+        if tab_routed_map.open:
+            st.pydeck_chart(
+                build_map(
+                    routed_map_points,
+                    routed_map_metrics,
+                    routed_map_view,
+                    optimized_colors,
+                    routed_map_paths,
+                    show_centroids=routed_map_show_centroids,
+                ),
+                width="stretch",
+                height=750,
+                key=f"routed_map_chart_{selected_lot}",
+            )
         st.caption("O traçado é uma estimativa por vizinho mais próximo, não uma rota viária real.")
 
 with tab_distribution:
@@ -819,7 +855,7 @@ with tab_glossary:
         1. **Selecione um lote comparável** na barra lateral e confirme a quantidade de instalações nos dois cenários.
         2. Use a distância de **Vizinho mais próximo** para avaliar a proximidade local entre instalações e identificar pontos isolados.
         3. No **Resumo**, verifique se a redução de rotas ocorreu junto com redução das distâncias e do raio médio.
-        4. Use **Mapa** e **Dispersão** para localizar ULs extensas, instalações isoladas e valores extremos escondidos pela média. No mapa, ative o traçado para evidenciar saltos longos dentro da UL.
+        4. Use **Mapa** e **Dispersão** para localizar ULs extensas e instalações isoladas. No Mapa, selecione MRUs roteirizadas para ver as mesmas instalações nas rotas antigas. Os mapas iniciam no mesmo enquadramento e permitem navegação independente; o traçado evidencia saltos entre os pontos visíveis.
         5. Use **Mapa Roteirizado** para inspecionar uma ou várias rotas em um mapa ampliado, com controles independentes de traçado e centroides.
         6. Em **Percurso total**, compare a soma das sequências estimadas por Haversine e por projeção métrica do GeoPandas.
         7. Em **Reagrupamento**, quantifique quanto da composição anterior foi preservada ou reorganizada.
@@ -836,8 +872,8 @@ with tab_glossary:
         },
         {
             "Aba": "Mapa",
-            "O que apresenta": "Distribuição geográfica das instalações e centroides, com traçado opcional por vizinho mais próximo.",
-            "Como analisar": "Ative o traçado e procure segmentos muito longos, que evidenciam instalações isoladas ou descontinuidades. As cores são alinhadas por sobreposição, não pelo ID da UL.",
+            "O que apresenta": "Mapas Atual e Roteirizada com o mesmo enquadramento inicial e filtro compartilhado pelas MRUs roteirizadas.",
+            "Como analisar": "Selecione uma ou várias MRUs para localizar as mesmas instalações na estrutura antiga; limpe para exibir todo o lote. Instalações novas só aparecem na Roteirizada. Zoom e deslocamento são independentes. Traçados e centroides usam apenas os pontos visíveis de cada UL; as cores do lote são preservadas.",
         },
         {
             "Aba": "Mapa Roteirizado",
